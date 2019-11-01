@@ -1,0 +1,274 @@
+---
+title: "make_tidy_qnoise"
+author: "Emily Lundberg (based on code from Lew Harvey)"
+date: "9/13/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
+
+rm(list = ls())
+
+library("tidyverse")
+library("knitr")
+```
+
+
+# Quality Data Files
+
+The raw data files (.txt format) from the QNoise task consist of pairs of files for each subject. One txt file is for the participant's annoyance scale ratings and the other is for the participant's overall quality ratings.These files are not in a tidy format suitable for graphing and statistical analysis. This script combines each pair of files into one tidy csv file. The two pairs of text files are:
+
+**CUxx_results.txt** files contain 3 pieces of information in the file name (e.g., `CU01_QNoise_Annoyance_result.txt`)
+
+1. The subject ID (e.g., CU001)
+2. The experiment name (should be QNoise for all files)
+3. The judgment rating scale (i.e., Annoyance or Overall)
+    
+Each subject has two results files. One files for each of the two qualities that were judged: Annoyance and Overall. There are 320 ratings for each scale.
+    
+The contents of each results file has 323 rows
+
+1. Row 1 holds the subject identifier
+2. Row 2 holds the db loss at each of six test frequencies (unspecified in the data file)
+3. Row 3 holds the column header names (which normally would be in row 1 of a tidy data file) 
+4. Row 4 through row 323 holds the results of each of the 320 quality trials
+5. There are 3 columns in the data file corresponding to the three headers on Row 3
+1. `Scale`: the name of one of the three qualities being rated (`Annoyance`, `Overall`)
+2. `File`: the complete path name of the sound file used on that trial
+3. `Rating`: the subjective rating on a 1-100 scale
+
+# Hearing Data from the Files
+
+Both files contain the hearing loss at six frequencies in the second row. The frequencies are 250, 500, 1000, 2000, 4000, and 6000 (not 8000).
+
+# Purpose of this script
+
+The goal of this script is to create tidy csv data files with all the information in each file needed to do various kinds of data analyses and make a variety of plots. This script writes out two csv files for each subject: the results combined with the two scales, and the hearing loss information for each subject. The stategy is:
+
+1. Extract the subject ID and hearing loss information from the original txt files
+2. Check to make sure that the subject IDs are the same for the pairs
+4. Read the trials data from each pair of files into separate data frames
+4. Add a subject ID column to each of the two data frames
+4. Add a trial_number column to each of the two data frames to uniquely identify corresponding rows
+5. Add a column to the stimulus info file with the three levels of processing (Linear, Mild, Moderate)
+6. Join the two data frames into one data frame
+7. Write the new data frame to a csv file, one for each subject
+8. Write the subject ID and hearing loss information to a csv file, one for each subject
+9. Write the combined data frame to a csv file, containing the data for all subjects
+10. Write the subject information to a csv file, containing the data for all subjects
+
+\newpage
+\FloatBarrier
+
+# QNoise Variables
+
+The following variables were included in the QNoise recordings that were presented to participants:
+
+1. Noise type (5)
+Noise was made up of either 6-talker babble, 3-talker noise, traffic, restaurant, or kitchen noise. 
+2. Segment (9)
+Each recording used consisted of a different segment of noise (numbered 1-9)
+4. SNR (5)
+Five SNRs were tested - 0, 3, 8, 12, and 20 dB SNR
+5. Processing (2)
+Either a "mild" or "strong" degree of processing was applied to each recording
+6. Vent (2)
+Processing of either a 350 or 800 vent was applied to each recording
+
+```{r}
+# get the names of the corresponding files
+output_path <- file.path("..", "..", "QNoise_data_csv_backup")
+quality_path <- file.path("..", "..", "QNoise_data_toclean")
+
+# get list of individual subject folders
+file_names_subjects <- list.files(quality_path)
+
+nsubjects <- length(file_names_subjects)
+
+```
+
+```{r}
+# function to extract subject name from data file name and to convert
+# it from a four-character string (e.g., CU01) to a five-character string (e.g., CU001)
+extract_subject <- function(fn) {
+    sID <- read_lines(fn, n_max = 1) %>%
+        str_remove_all(".*:") %>%
+        str_remove_all(" ") %>%
+        str_remove_all("\t")
+    
+    if (str_length(sID) == 4) {
+        str_sub(sID, 1, 2) <- str_pad(str_sub(sID, 1, 2),
+                                             width = 3, 
+                                             side = "right",
+                                             pad = "0")
+    }
+    return(sID)
+}
+
+# function to extract 6 hearing loss values from data files
+extract_hearing <- function(fn) {
+    read_tsv(fn, skip = 1, n_max = 1, 
+             col_names = c("str", "250", "500", "1000", "2000", "4000",  "6000"),
+             col_types = "cdddddd")[-1] # remove string
+}
+
+# extract vent from File column of results file
+# function tested on 9-25-19 by Emily using 
+# test_ventfxn <- "..\\QNoise_Stimuli\\CU01\\test\\CU01_113_Traffic_6_12_strong_350.wav" 
+# vent_test <- data.frame(file = test_ventfxn)
+# print(vent_test)                                                                file
+# 1 ..\\QNoise_Stimuli\\CU01\\test\\CU01_113_Traffic_6_12_strong_350.wav
+# print(extract_vent(vent_test))
+# [1] "350"
+
+extract_vent <- function(df) {
+    v <- df$file
+    v <- str_sub(v, -7, -5)
+}
+
+# extract noise type from File column of results file
+# function tested on 9/25/19 by Emily using
+# test_noisefxn <- "..\\QNoise_Stimuli\\CU01\\test\\CU01_113_Traffic_6_12_strong_350.wav" 
+# noise_test <- data.frame(file = test_noisefxn)
+# print(noise_test)
+# 1 ..\\QNoise_Stimuli\\CU01\\test\\CU01_113_Traffic_6_12_strong_350.wav
+# print(extract_noise_type(noise_test))
+ 
+extract_noise_type <- function(df) {
+    v <- df$file
+    df %>% separate(file, into = paste0('Noise_Type'), sep = '[_]', 3:4)
+}
+
+# extract segment number from File column of results file
+extract_segment_number <- function(df) {
+    v <- df$Segment_Number
+    v <- str_split(v, "_", 4)
+}
+
+# extract SNR from File column of results file
+extract_snr <- function(df) {
+    v <- df$SNR
+    v <- str_split(v, "_", 5)
+}
+
+# extract processing from File column of results file
+extract_proc <- function(df) {
+    v <- df$Processing
+    v <- str_split(v, "_", 6)
+}
+
+# extract trial number from File column of results file
+extract_trial <- function(df) {
+    v <- df$Trial_Number
+    v <- str_split(v, "_", 2)
+}
+
+# extract scale from subject results file name
+extract_scale <- function(fn) {
+    v <- str_split(fn, "_", 3)
+}
+
+```
+*****************************************************************************************************
+
+```{r}
+
+df_all <- tibble()  # for combined data
+df_shl <- tibble()  # for subjects data (ID and hearing loss)
+for (subject in file_names_subjects) {
+    # get path to the subject's files
+    subject_files_path <- file.path(quality_path, subject)
+    
+    # get file names for that subject
+    results_file_names <- list.files(subject_files_path, pattern = "._result\\.txt$")}
+    
+    # read in the result file of the subject 
+    # each result file has the corresponding talker stimulus information added
+    df_all_scales <- data.frame()
+    for (results_file in results_file_names) {
+        
+        # extract subject ID from the results file
+        subjID <- extract_subject(file.path(subject_files_path, results_file))
+        
+        # make hearing loss data frame from subject file
+        df_hearing_loss <- extract_hearing(file.path(subject_files_path, results_file)) %>%
+            add_column(subjID = subjID, .before = 1) %>%
+            gather(key = "test_Hz", value = "loss_dB", -subjID, convert = TRUE)
+        if (nrow(df_hearing_loss) != 6) {
+            stop(paste("File", results_file, "does not have 6 hearing-loss frequencies. Has ", nrow(df_hearing_loss)))
+        }
+        
+        # add hearing loss to subject data frame
+        df_shl <- bind_rows(df_shl, df_hearing_loss)
+        
+        ## ----- process the 2 results files
+        ## note: the files have been manually repaired so these problems do not now exist
+        # read in the results file
+        # # Note: some results files have four additional tabs at the end of each line!
+        # # These "columns" get removed below
+        # cnames <- read_tsv(file.path(subject_files_path, results_file), skip = 2, n_max = 0,
+        #                    col_types = "ccc", col_names = TRUE) %>%
+        #     names(.)
+        # 
+        # # keep only the three columns, not the empty ones caused by
+        # # extra tabs at the end of each line.
+        
+        # loop through the subject's results files
+        # add new columns to results file
+        df_results <- read_tsv(file.path(subject_files_path, results_file),
+                               skip = 2,
+                               col_types = "ccd") %>%
+            add_column(subjID, .before = "Scale") %>%
+            add_column(Scale = extract_scale(.), .before = "Scale") %>%
+            add_column(Trial_Number = extract_trial(.), .before = "Scale") %>%
+            add_column(Noise_Type = extract_noise_type(.), .before = "Scale") %>%
+            add_column(Segment_Number = extract_segment_number(.), .before = "Scale") %>%
+            add_column(SNR = extract_snr(.), .before = "Scale") %>%
+            add_column(Processing = extract_proc(.), .before = "Scale") %>%
+            add_column(Vent = extract_vent(.), .before = "Scale") 
+    
+    # write the two individual subject csv files
+    write_csv(df_results, file.path(output_path, paste(subjID, "_QNoise_Results.csv", sep = "")))
+    write_csv(df_shl,    file.path(output_path,
+                                   paste(subjID, "_QNoise_hearing_loss.csv", sep = "")))
+}
+```
+
+
+```{r}
+write_csv(df_all, file.path(output_path, "QNoise_all_subjects_data_withCU038.csv"))
+write_csv(df_shl, file.path(output_path, "QNoise_all_subjects_hearing_loss.csv"))
+
+```
+
+# Number of Test Trials per Subject
+
+```{r}
+df_ntrials <- data.frame()
+for (i in levels(as.factor(df_all$subjID))) {
+    df_ntrials <- rbind(df_ntrials, data.frame(subjID = i,
+                                               nTrials = nrow(subset(df_all, subjID == i))))
+}
+
+kable(df_ntrials, caption = "Number of test trials per subject.")
+```
+
+\newpage
+\FloatBarrier
+
+
+
+```{r echo = FALSE, fig.cap = "\\label{fig:lossEach}Hearing loss in decibels for each of the hearing impared subjects."}
+
+ggplot(df_shl, aes(test_Hz, loss_dB, color = subjID)) +
+    scale_x_log10() +
+    scale_y_reverse() +
+    geom_line(show.legend = TRUE) +
+    geom_point(show.legend = FALSE) +
+    facet_wrap(vars(subjID), ncol = 8) + 
+    xlab("Test Frequency in Hz") +
+    ylab("Hearing Loss in dB") +
+    ggtitle("Hearing Loss of Each Subject") 
+```
+
